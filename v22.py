@@ -866,7 +866,6 @@ class CrawlerStats:
         logging.info(f"\nErros:")
         logging.info(f"  404: {self.erros_404}")
         logging.info(f"  Timeout: {self.erros_timeout}")
-        logging.info(f"  Conexão: {self.erros_connection}")
         logging.info(f"  Rate Limit: {self.erros_rate_limit}")
         logging.info(f"\nTop Categorias:")
         for cat, count in sorted(self.categorias.items(), key=lambda x: x[1], reverse=True)[:5]:
@@ -1582,12 +1581,39 @@ def main():
             db=0
         )
         
-        # Cria índice no ElasticSearch se não existir
-        if not es.indices.exists(index=Config.ES_INDEX_DOCS):
-            es.indices.create(
-                index=Config.ES_INDEX_DOCS,
-                body=Config.ES_INDEX_MAPPING
-            )
+    try:
+        # Verifica se o índice existe usando get
+        es.indices.get(index=Config.ES_INDEX_DOCS)
+    except elasticsearch.NotFoundError:
+        # Se o índice não existe, cria com as configurações
+        es.indices.create(
+            index=Config.ES_INDEX_DOCS,
+            body={
+                "settings": {
+                    "number_of_shards": 1,
+                    "number_of_replicas": 0
+                },
+                "mappings": {
+                    "properties": {
+                        "url": { "type": "keyword" },
+                        "titulo": { "type": "text" },
+                        "texto": { "type": "text" },
+                        "categoria": { "type": "keyword" },
+                        "data_coleta": { "type": "date" },
+                        "tamanho_html": { "type": "integer" },
+                        "tamanho_texto": { "type": "integer" },
+                        "num_links": { "type": "integer" },
+                        "links": { "type": "keyword" },
+                        "palavras_chave": { "type": "keyword" },
+                        "eh_importante": { "type": "boolean" },
+                        "prioridade": { "type": "integer" },
+                        "idioma": { "type": "keyword" },
+                        "entidades": { "type": "object" },
+                        "tipo_documento": { "type": "keyword" }
+                    }
+                }
+            }
+        )
         
         # Inicia o crawler
         urls_iniciais = [
@@ -1659,7 +1685,6 @@ def main():
         logging.info(f"\nErros:")
         logging.info(f"  404: {stats.erros_404}")
         logging.info(f"  Timeout: {stats.erros_timeout}")
-        logging.info(f"  Conexão: {stats.erros_conexao}")
         logging.info(f"  Rate Limit: {stats.erros_rate_limit}")
         
         # Lista as categorias mais comuns
