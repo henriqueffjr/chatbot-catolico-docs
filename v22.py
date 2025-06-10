@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from collections import Counter  # Adicione esta linha no topo do arquivo
 import os
 import sys
 import logging
@@ -39,8 +40,13 @@ from fastapi import FastAPI, Query, Path, HTTPException
 from pydantic import BaseModel
 import uvicorn
 import spacy
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError as ElasticsearchNotFoundError
 import redis
+import logging
+import gc
+import psutil
+import time
+from collections import Counter
 
 def log_execution_time(func):
     @wraps(func)
@@ -1562,6 +1568,9 @@ def main():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
+    # Cria o logger
+    log = logging.getLogger(__name__)
+    
     # Inicializa estatísticas
     stats = CrawlerStats()
     inicio = datetime.now()
@@ -1574,7 +1583,11 @@ def main():
         os.makedirs(Config.METADATA_DIR, exist_ok=True)
         
         # Inicializa conexões com ElasticSearch e Redis
-        es = Elasticsearch([Config.ELASTICSEARCH_HOST])
+        es = Elasticsearch(
+            'http://localhost:9200',
+            maxsize=25
+        )
+        
         redis_client = redis.Redis(
             host=Config.REDIS_HOST,
             port=Config.REDIS_PORT,
@@ -1584,7 +1597,7 @@ def main():
         try:
             # Verifica se o índice existe usando get
             es.indices.get(index=Config.ES_INDEX_DOCS)
-        except elasticsearch.NotFoundError:
+        except ElasticsearchNotFoundError:
             # Se o índice não existe, cria com as configurações
             es.indices.create(
                 index=Config.ES_INDEX_DOCS,
@@ -1614,49 +1627,77 @@ def main():
                     }
                 }
             )
+            log.info("Índice Elasticsearch criado com sucesso")
 
-        # Inicia o crawler
+        # Inicia o crawler com controle de memória
         urls_iniciais = [
             "https://www.vatican.va/content/vatican/pt.html",
             "https://www.vatican.va/content/francesco/pt.html"
         ]
         
-        for url in urls_iniciais:
-            metadata = baixar_e_processar(url, depth=0, stats=stats)
-            if metadata and metadata.links:
-                # Indexa o documento no ElasticSearch
-                doc_id = hashlib.md5(url.encode()).hexdigest()
-                es.index(
-                    index=Config.ES_INDEX_DOCS,
-                    id=doc_id,
-                    body=metadata.to_dict()
-                )
-                # Adiciona ao cache do Redis
-                redis_client.setex(
-                    f"doc:{doc_id}",
-                    Config.CACHE_TIMEOUT,
-                    json.dumps(metadata.to_dict())
-                )
-                
-                # Processa links encontrados
-                for link in metadata.links:
-                    metadata_link = baixar_e_processar(link, depth=1, stats=stats)
-                    if metadata_link:
-                        link_id = hashlib.md5(link.encode()).hexdigest()
-                        es.index(
-                            index=Config.ES_INDEX_DOCS,
-                            id=link_id,
-                            body=metadata_link.to_dict()
-                        )
+        # Define o tamanho máximo de memória (em bytes) - 1GB
+        max_memory = 1024 * 1024 * 1024
         
-        # Inicia a API
-        api = VaticanAPI()
-        api.iniciar()
+        for url in urls_iniciais:
+            # Verifica uso de memória
+            if psutil.Process().memory_info().rss > max_memory:
+                log.warning("Limite de memória atingido, pausando por 30 segundos")
+                time.sleep(30)
+                gc.collect()
+            
+            try:
+                metadata = baixar_e_processar(url, depth=0, stats=stats)
+                if metadata and metadata.links:
+                    # Indexa o documento no ElasticSearch
+                    doc_id = hashlib.md5(url.encode()).hexdigest()
+                    es.index(
+                        index=Config.ES_INDEX_DOCS,
+                        id=doc_id,
+                        document=metadata.to_dict()
+                    )
+                    
+                    # Adiciona ao cache do Redis
+                    redis_client.setex(
+                        f"doc:{doc_id}",
+                        Config.CACHE_TIMEOUT,
+                        json.dumps(metadata.to_dict())
+                    )
+                    
+                    # Processa links em lotes menores
+                    batch_size = 5  # Reduzido para 5
+                    for i in range(0, len(metadata.links), batch_size):
+                        batch = metadata.links[i:i + batch_size]
+                        
+                        # Verifica memória antes de cada lote
+                        if psutil.Process().memory_info().rss > max_memory:
+                            log.warning("Limite de memória atingido no lote, pausando")
+                            time.sleep(30)
+                            gc.collect()
+                        
+                        for link in batch:
+                            try:
+                                metadata_link = baixar_e_processar(link, depth=1, stats=stats)
+                                if metadata_link:
+                                    link_id = hashlib.md5(link.encode()).hexdigest()
+                                    es.index(
+                                        index=Config.ES_INDEX_DOCS,
+                                        id=link_id,
+                                        document=metadata_link.to_dict()
+                                    )
+                            except Exception as e:
+                                log.error(f"Erro ao processar link {link}: {str(e)}")
+                            
+                        # Força limpeza de memória após cada lote
+                        gc.collect()
+                        
+            except Exception as e:
+                log.error(f"Erro ao processar URL {url}: {str(e)}")
+                continue
         
     except KeyboardInterrupt:
-        logging.info("\nInterrompido pelo usuário")
+        log.info("\nInterrompido pelo usuário")
     except Exception as e:
-        logging.error(f"Erro: {e}")
+        log.error(f"Erro: {e}")
     finally:
         # Calcula tempo total
         tempo_total = datetime.now() - inicio
@@ -1664,36 +1705,36 @@ def main():
         minutos = (tempo_total.seconds % 3600) // 60
         
         # Exibe relatório
-        logging.info("\n" + "="*70)
-        logging.info("RELATÓRIO DETALHADO DO CRAWLER")
-        logging.info("="*70)
-        logging.info(f"Tempo de execução: {horas}h {minutos}m")
-        logging.info(f"URLs processadas: {stats.urls_processadas}")
+        log.info("\n" + "="*70)
+        log.info("RELATÓRIO DETALHADO DO CRAWLER")
+        log.info("="*70)
+        log.info(f"Tempo de execução: {horas}h {minutos}m")
+        log.info(f"URLs processadas: {stats.urls_processadas}")
         if stats.urls_processadas > 0:
             taxa_sucesso = ((stats.urls_processadas - stats.urls_falhas) / 
                            stats.urls_processadas) * 100
-            logging.info(f"Taxa de sucesso: {taxa_sucesso:.1f}%")
+            log.info(f"Taxa de sucesso: {taxa_sucesso:.1f}%")
             
             velocidade = stats.bytes_baixados / (tempo_total.seconds or 1) / 1024
-            logging.info(f"Velocidade média: {velocidade:.2f} KB/s")
+            log.info(f"Velocidade média: {velocidade:.2f} KB/s")
             
             media_links = (stats.links_encontrados / 
                          stats.urls_processadas if stats.urls_processadas > 0 else 0)
-            logging.info(f"Média de links por página: {media_links:.1f}")
+            log.info(f"Média de links por página: {media_links:.1f}")
         
-        logging.info(f"Documentos importantes: {stats.docs_importantes}")
-        logging.info(f"\nErros:")
-        logging.info(f"  404: {stats.erros_404}")
-        logging.info(f"  Timeout: {stats.erros_timeout}")
-        logging.info(f"  Rate Limit: {stats.erros_rate_limit}")
+        log.info(f"Documentos importantes: {stats.docs_importantes}")
+        log.info(f"\nErros:")
+        log.info(f"  404: {stats.erros_404}")
+        log.info(f"  Timeout: {stats.erros_timeout}")
+        log.info(f"  Rate Limit: {stats.erros_rate_limit}")
         
         # Lista as categorias mais comuns
         if stats.categorias:
-            logging.info(f"\nTop Categorias:")
+            log.info(f"\nTop Categorias:")
             for cat, count in sorted(stats.categorias.items(), 
                                    key=lambda x: x[1], reverse=True):
-                logging.info(f"  {cat}: {count} documentos")
-        logging.info("="*70)
+                log.info(f"  {cat}: {count} documentos")
+        log.info("="*70)
 
 if __name__ == "__main__":
     main()
