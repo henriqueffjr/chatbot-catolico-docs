@@ -1581,40 +1581,40 @@ def main():
             db=0
         )
         
-    try:
-        # Verifica se o índice existe usando get
-        es.indices.get(index=Config.ES_INDEX_DOCS)
-    except elasticsearch.NotFoundError:
-        # Se o índice não existe, cria com as configurações
-        es.indices.create(
-            index=Config.ES_INDEX_DOCS,
-            body={
-                "settings": {
-                    "number_of_shards": 1,
-                    "number_of_replicas": 0
-                },
-                "mappings": {
-                    "properties": {
-                        "url": { "type": "keyword" },
-                        "titulo": { "type": "text" },
-                        "texto": { "type": "text" },
-                        "categoria": { "type": "keyword" },
-                        "data_coleta": { "type": "date" },
-                        "tamanho_html": { "type": "integer" },
-                        "tamanho_texto": { "type": "integer" },
-                        "num_links": { "type": "integer" },
-                        "links": { "type": "keyword" },
-                        "palavras_chave": { "type": "keyword" },
-                        "eh_importante": { "type": "boolean" },
-                        "prioridade": { "type": "integer" },
-                        "idioma": { "type": "keyword" },
-                        "entidades": { "type": "object" },
-                        "tipo_documento": { "type": "keyword" }
+        try:
+            # Verifica se o índice existe usando get
+            es.indices.get(index=Config.ES_INDEX_DOCS)
+        except elasticsearch.NotFoundError:
+            # Se o índice não existe, cria com as configurações
+            es.indices.create(
+                index=Config.ES_INDEX_DOCS,
+                body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0
+                    },
+                    "mappings": {
+                        "properties": {
+                            "url": { "type": "keyword" },
+                            "titulo": { "type": "text" },
+                            "texto": { "type": "text" },
+                            "categoria": { "type": "keyword" },
+                            "data_coleta": { "type": "date" },
+                            "tamanho_html": { "type": "integer" },
+                            "tamanho_texto": { "type": "integer" },
+                            "num_links": { "type": "integer" },
+                            "links": { "type": "keyword" },
+                            "palavras_chave": { "type": "keyword" },
+                            "eh_importante": { "type": "boolean" },
+                            "prioridade": { "type": "integer" },
+                            "idioma": { "type": "keyword" },
+                            "entidades": { "type": "object" },
+                            "tipo_documento": { "type": "keyword" }
+                        }
                     }
                 }
-            }
-        )
-        
+            )
+
         # Inicia o crawler
         urls_iniciais = [
             "https://www.vatican.va/content/vatican/pt.html",
